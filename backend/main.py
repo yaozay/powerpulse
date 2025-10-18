@@ -79,8 +79,14 @@ def analyze(req: AnalyzeReq):
     potential = round(sum(e["savings"]["kwh"] for e in events if e["type"] != "NORMAL"), 2)
     top_event = max(events, key=lambda e: (e["savings"]["kwh"], e["type"]!="NORMAL"))
 
-    # 5) Nudge (replace with real Gemini later)
-    nudge = build_nudge(persona, {"peak": True, "top_event": top_event, "today_kwh": today_kwh, "pot_kwh": potential})
+    context = {
+    "location": {"city": "Houston"},           # optional
+    "tariff": {"is_peak": True},               # or your actual tariff state
+    "top_event": top_event,
+    "summary": {"todayKwh": today_kwh, "potentialSavingsKwh": potential}
+    }
+    
+    nudge = build_nudge(persona, context)
 
     return {
         "horizonMinutes": 12*60,
