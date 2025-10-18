@@ -1,3 +1,5 @@
+"use client"
+
 import { Navigation } from "@/components/navigation"
 import { NowSection } from "@/components/now-section"
 import { ForecastSection } from "@/components/forecast-section"
