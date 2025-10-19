@@ -1,28 +1,21 @@
 "use client"
 
-import { useEffect, useState } from "react"
 import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from "recharts"
 import { ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart"
-import { loadDailyUsageByHour } from "@/lib/loadDailyUsage"
+import type { DashboardMetrics } from "@/lib/api"
 
-type Point = { time: string; kwh: number }
-
-export function EnergyChart({
-  homeId,
-  date, // optional "M/D/YY" (e.g., "6/15/23"); if omitted, uses latest in the file
-}: {
+interface EnergyChartProps {
   homeId: string
-  date?: string
-}) {
-  const [data, setData] = useState<Point[]>([])
+  metrics: DashboardMetrics | null
+}
 
-  useEffect(() => {
-    loadDailyUsageByHour(homeId, date).then(setData).catch(console.error)
-  }, [homeId, date])
-
+export function EnergyChart({ metrics }: EnergyChartProps) {
   const chartConfig = {
     kwh: { label: "Energy (kWh)", color: "hsl(var(--chart-1))" },
   } as const
+
+  // Use data from API or empty array
+  const data = metrics?.hourly_usage_24h || []
 
   return (
     <ChartContainer config={chartConfig} className="h-[300px] w-full">
@@ -34,17 +27,29 @@ export function EnergyChart({
           </linearGradient>
         </defs>
         <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
-        <XAxis dataKey="time" tickLine={false} axisLine={false} tickMargin={8} className="text-xs" />
+        <XAxis 
+          dataKey="time" 
+          tickLine={false} 
+          axisLine={false} 
+          tickMargin={8} 
+          className="text-xs" 
+        />
         <YAxis
           tickLine={false}
           axisLine={false}
           tickMargin={8}
           className="text-xs"
           tickFormatter={(v) => `${v} kWh`}
-          domain={[0, "dataMax + 1"]}
+          domain={[0, "dataMax + 0.5"]}
         />
         <ChartTooltip content={<ChartTooltipContent />} />
-        <Area type="monotone" dataKey="kwh" stroke="var(--color-kwh, var(--chart-1))" strokeWidth={2} fill="url(#fillKWh)" />
+        <Area 
+          type="monotone" 
+          dataKey="kwh" 
+          stroke="var(--color-kwh, var(--chart-1))" 
+          strokeWidth={2} 
+          fill="url(#fillKWh)" 
+        />
       </AreaChart>
     </ChartContainer>
   )
