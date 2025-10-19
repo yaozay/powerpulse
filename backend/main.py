@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException,Query
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from models import AnalyzeReq, AnalyzeResp
@@ -13,6 +13,11 @@ from services.analytics import (
 )
 from services.llm import build_nudge
 from services.csv_processor import EnergyDataProcessor
+
+load_dotenv()
+
+app = FastAPI(title="PowerPulse Backend")
+
 
 load_dotenv()
 app = FastAPI(title="PowerPulse Backend")
@@ -48,6 +53,18 @@ except Exception as e:
 @app.get("/health")
 def health(): 
     return {"ok": True, "csv_loaded": csv_processor.df is not None}
+
+@app.get("/homes/{home_id}/devices")
+def get_devices(home_id: int = 1):
+    try:
+        devices = csv_processor.get_devices(home_id)
+        print(f"[devices] home_id={home_id} -> {len(devices)} devices")
+        return {"home_id": home_id, "devices": devices}
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="CSV data file not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
 
 # ============= ORIGINAL ANALYZE ENDPOINT =============
 @app.post("/analyze", response_model=AnalyzeResp)
@@ -193,6 +210,7 @@ def get_weather_info(home_id: int = 1):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 if __name__ == "__main__":
     import uvicorn
