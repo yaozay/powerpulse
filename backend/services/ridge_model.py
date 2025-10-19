@@ -212,7 +212,7 @@ def train_and_forecast(
     diffs = df[TS_COL].diff().dropna()
     step = diffs.median() if len(diffs) > 0 else pd.Timedelta(hours=1)
     if not isinstance(step, pd.Timedelta):
-        step = pd.to_timedelta(step, errors="ignore")  # type: ignore[arg-type]
+        step = pd.to_timedelta(step, errors="ignore")
     if not isinstance(step, pd.Timedelta) or step <= pd.Timedelta(0):
         step = pd.Timedelta(hours=1)
 

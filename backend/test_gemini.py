@@ -8,7 +8,6 @@ KEY = os.getenv("GEMINI_API_KEY")
 assert KEY, "Missing GEMINI_API_KEY in .env"
 genai.configure(api_key=KEY)
 
-# See what's available in your SDK
 print("Listing models that support generateContent:")
 for m in genai.list_models():
     if "generateContent" in m.supported_generation_methods:

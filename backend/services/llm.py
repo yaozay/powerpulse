@@ -1,25 +1,63 @@
-import os, json, time
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+from typing import Mapping, Sequence
+
 from dotenv import load_dotenv
 import google.generativeai as genai
 
-load_dotenv()
+
+class LLMUnavailable(RuntimeError):
+    
+    DOTENV_PATH =  (
+        Path(__file__).resolve().parent.parent / ".env"
+    )
+    load_dotenv(dotenv_path=DOTENV_PATH, override=True)
+
 KEY = os.getenv("GEMINI_API_KEY")
-MODEL = os.getenv("GEMINI_MODEL") or "gemini-2.5-flash"
+MODEL_NAME = os.getenv("GEMINI_MODEL")
 
-# init
-genai.configure(api_key=KEY)
-_model = genai.GenerativeModel(MODEL)
+SYSTEM_INSTRUCTION_NUDGE = (
+    "You are PowerPulse, a concise energy coach. "
+    "Write ONE suggestion (<= 180 characters). "
+    "Use ONLY numbers from the provided JSON. Do not invent values. "
+    "No emojis, no disclaimers."
+)
 
-def _fallback(persona: str, top_event: dict) -> str:
-    sav = (top_event or {}).get("savings", {}) or {}
-    kwh = sav.get("kwh", 0.0)
-    co2 = sav.get("co2_g", 0)
-    usd = sav.get("cost_usd", 0.0)
-    if persona == "budget":  return f"Peak rates—shift a cycle and save ${usd:.2f}."
-    if persona == "comfort": return "Raise thermostat ~2°F to trim the peak without losing comfort."
-    return f"Small changes now could avoid ~{co2} g CO₂."
+SYSTEM_INSTRUCTION_CHAT = (
+    "You are PowerPulse, a concise residential energy coach. "
+    "Respond with one clear, supportive suggestion (<= 200 characters). "
+    "Reference the chat when helpful. No emojis, no disclaimers."
+)
 
-def build_nudge(persona: str, context: dict) -> str:
+if KEY:
+    genai.configure(api_key=KEY)
+    _nudge_model = genai.GenerativeModel(
+        MODEL_NAME,
+        system_instruction=SYSTEM_INSTRUCTION_NUDGE,
+    )
+    _chat_model = genai.GenerativeModel(
+        MODEL_NAME,
+        system_instruction=SYSTEM_INSTRUCTION_CHAT,
+    )
+else:
+    _nudge_model = None
+    _chat_model = None
+
+
+def _require_model(kind: str = "nudge"):
+    model = _nudge_model if kind == "nudge" else _chat_model
+    if model is None:
+        raise LLMUnavailable(
+            "Gemini client is not configured. "
+            "Set GEMINI_API_KEY (and optionally GEMINI_MODEL) in your environment."
+        )
+    return model
+
+
+def build_nudge(persona: str, context: Mapping[str, object]) -> str:
     """
     persona: 'eco' | 'budget' | 'comfort'
     context: {
@@ -29,10 +67,8 @@ def build_nudge(persona: str, context: dict) -> str:
       'location': {'city': str}
     }
     """
-    if not KEY:
-        return _fallback(persona, context.get("top_event", {}))
+    model = _require_model("nudge")
 
-    # Keep payload minimal—reduces chance of hallucination.
     payload = {
         "persona": persona,
         "top_event": {
@@ -47,29 +83,65 @@ def build_nudge(persona: str, context: dict) -> str:
         "location": context.get("location", {}),
     }
 
-    system = (
-        "You are PowerPulse, a concise energy coach.\n"
-        "Write ONE suggestion (<= 180 characters).\n"
-        "Use ONLY numbers from the JSON. Do not invent values. No emojis, no disclaimers."
+    user = (
+        'Return JSON like {"message":"..."}.\n'
+        "Analytics JSON:\n" + json.dumps(payload, ensure_ascii=False)
     )
-    user = 'Return JSON like {"message":"..."}.\nAnalytics JSON:\n' + json.dumps(payload)
 
     try:
-        resp = _model.generate_content(
-            [{"role":"system","parts":[system]},
-             {"role":"user","parts":[user]}],
-            generation_config={"temperature":0.2, "max_output_tokens":120},
-            request_options={"timeout": 20}
+        resp = model.generate_content(
+            [{"text": user}],
+            generation_config={"temperature": 0.2, "max_output_tokens": 300},
+            request_options={"timeout": 20},
         )
-        text = (resp.text or "").strip()
-        if text.startswith("{"):
-            try:
-                msg = json.loads(text).get("message","").strip()
-            except Exception:
-                msg = text
-        else:
-            msg = text
-        msg = " ".join(msg.split())
-        return (msg[:177] + "...") if len(msg) > 180 else (msg or _fallback(persona, payload["top_event"]))
-    except Exception:
-        return _fallback(persona, payload["top_event"])
+    except Exception as exc:
+        raise RuntimeError("Gemini build_nudge request failed") from exc
+
+    text = (getattr(resp, "text", "") or "").strip()
+    if text.startswith("{"):
+        try:
+            text = json.loads(text).get("message", "").strip()
+        except Exception as exc:
+            raise RuntimeError("Gemini build_nudge returned invalid JSON") from exc
+    if not text:
+        raise RuntimeError("Gemini build_nudge returned empty response")
+    return " ".join(text.split())
+
+
+def chat_reply(
+    messages: Sequence[Mapping[str, str]],
+    persona: str | None = None,
+    context: Mapping[str, object] | None = None,
+) -> str:
+    model = _require_model("chat")
+    persona = persona or "eco"
+    context = context or {}
+
+    history = [
+        {"role": m.get("role", "user"), "content": m.get("content", "")}
+        for m in messages[-10:]
+    ]
+    payload = {
+        "persona": persona,
+        "context": context,
+        "history": history,
+    }
+
+    user_prompt = (
+        "Chat history JSON (latest last). Provide the next assistant reply.\n"
+        + json.dumps(payload, ensure_ascii=False)
+    )
+
+    try:
+        resp = model.generate_content(
+            [{"text": user_prompt}],
+            generation_config={"temperature": 0.3, "max_output_tokens": 350},
+            request_options={"timeout": 20},
+        )
+    except Exception as exc:
+        raise RuntimeError("Gemini chat_reply request failed") from exc
+
+    text = (getattr(resp, "text", "") or "").strip()
+    if not text:
+        raise RuntimeError("Gemini chat_reply returned empty response")
+    return " ".join(text.split())
