@@ -5,11 +5,16 @@ from models import AnalyzeReq, AnalyzeResp
 from services.weather import fetch_hourly
 from services.tariff import is_peak, tariff_cents
 from services.analytics import (
-    baseline_by_size, predict_kwh, deviation,
-    savings_raise_thermostat, savings_shift_appliance,
-    co2_g, cost_usd
+    baseline_by_size,
+    predict_kwh,
+    deviation,
+    savings_raise_thermostat,
+    savings_shift_appliance,
+    co2_g,
+    cost_usd,
 )
 from services.llm import build_nudge
+from services.ridge_model import load_forecast
 
 load_dotenv()
 app = FastAPI(title="PowerPulse Backend")
@@ -26,12 +31,24 @@ def analyze(req: AnalyzeReq):
     # 1) Weather (next 12 hours)
     hourly = fetch_hourly(lat, lng)  # [{ts, tempC, rh}...]
 
-    # 2) Baseline & predictions
+    # 2) Model forecast (48h) + baseline projections
+    try:
+        forecast = load_forecast()
+    except Exception:
+        forecast = []
+
     base = baseline_by_size(home_size)
     series = []
-    for h in hourly:
-        pred = predict_kwh(base, h["tempC"])
-        series.append({"ts": h["ts"], "predicted_kwh": pred, "baseline_kwh": round(base,3)})
+    for idx, h in enumerate(hourly):
+        if idx < len(forecast):
+            pred = float(forecast[idx].get("predicted_kwh", base))
+        else:
+            pred = predict_kwh(base, h["tempC"])
+        series.append({
+            "ts": h["ts"],
+            "predicted_kwh": round(pred, 3),
+            "baseline_kwh": round(base, 3)
+        })
 
     # 3) Events (SPIKE/PEAK/NORMAL) + savings
     events = []
