@@ -16,7 +16,6 @@ export const metadata: Metadata = {
   generator: "v0.app",
 }
 
-// ✅ Single RootLayout
 export default function RootLayout({
   children,
 }: Readonly<{

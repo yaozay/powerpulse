@@ -34,16 +34,10 @@ export function SignUpForm() {
       })
 
       if (result.status === "complete") {
-        // Assign sequential homeId
-        await fetch("/api/assign-home-id", {
-          method: "POST",
-          body: JSON.stringify({ userId: result.user.id }),
-        })
-
         await setActive({ session: result.createdSessionId })
         router.push("/")
       } else {
-        // Require verification
+        // Require email verification
         await signUp.prepareEmailAddressVerification({ strategy: "email_code" })
         setPendingVerification(true)
       }
@@ -66,12 +60,6 @@ export function SignUpForm() {
       const result = await signUp.attemptEmailAddressVerification({ code })
 
       if (result.status === "complete") {
-        // Assign sequential homeId
-        await fetch("/api/assign-home-id", {
-          method: "POST",
-          body: JSON.stringify({ userId: result.user.id }),
-        })
-
         await setActive({ session: result.createdSessionId })
         router.push("/")
       } else {
@@ -109,7 +97,7 @@ export function SignUpForm() {
             <Input
               id="password"
               type="password"
-              placeholder=""
+              placeholder="••••••••"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
@@ -126,7 +114,9 @@ export function SignUpForm() {
 
           <div className="text-center text-sm text-muted-foreground">
             Already have an account?{" "}
-            <a href="/login" className="text-primary hover:underline">Sign in</a>
+            <a href="/login" className="text-primary hover:underline">
+              Sign in
+            </a>
           </div>
         </form>
       ) : (

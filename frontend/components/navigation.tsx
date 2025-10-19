@@ -68,6 +68,7 @@ export function Navigation() {
 
           {/* Nav buttons + Auth */}
           <div className="flex items-center gap-4">
+            {/* Section navigation */}
             <div className="flex items-center gap-2 rounded-full bg-muted p-1">
               {navItems.map((item) => (
                 <button
@@ -85,13 +86,14 @@ export function Navigation() {
               ))}
             </div>
 
-            {/* Signed in → show user info + logout */}
+            {/* Signed in → show user info + Clerk profile dropdown */}
             <SignedIn>
               <div className="flex items-center gap-2">
-                <span className="text-sm text-muted-foreground">
-                  {user?.firstName || user?.emailAddresses[0]?.emailAddress}
-                </span>
-
+                {user && (
+                  <span className="text-sm text-muted-foreground">
+                    {user.firstName || user.emailAddresses[0]?.emailAddress}
+                  </span>
+                )}
                 <UserButton afterSignOutUrl="/" />
               </div>
             </SignedIn>
