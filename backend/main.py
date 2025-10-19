@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from pydantic import BaseModel
 
-from models import AnalyzeReq, AnalyzeResp  # keep models simple here
+from models import AnalyzeReq, AnalyzeResp, CoachChatReq, CoachChatResp
 from services.weather import fetch_hourly
 from services.tariff import is_peak, tariff_cents
 from services.analytics import (
@@ -99,10 +99,6 @@ def compute_evening_metrics_from_df(
     tariff_usd_per_kwh: float,
     grid_intensity_kg_per_kwh: float
 ) -> Dict[str, float]:
-    """
-    Compute total energy, cost, and CO₂ for the evening (5–10 pm) window for a given home_id.
-    Falls back to zeros if data/columns are missing.
-    """
     if df is None or df.empty:
         return {"evening_kwh": 0.0, "evening_cost_usd": 0.0, "evening_co2_kg": 0.0}
 
@@ -141,88 +137,17 @@ def compute_evening_metrics_from_df(
 # --------------------------
 # Chat endpoint (used by frontend coach)
 # --------------------------
-@app.post("/chat/energy-coach")
-def energy_coach(req: ChatReq):
+@app.post("/coach/chat", response_model=CoachChatResp)
+def coach_chat(req: CoachChatReq):
+    history = [msg.model_dump() for msg in req.messages]
     try:
-        msg_raw = (req.message or "").strip()
-        msg_lower = msg_raw.lower()
+        reply = chat_reply(history, persona=req.persona, context=req.context or {})
+    except LLMUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Gemini chat failed: {exc}") from exc
+    return {"message": reply}
 
-        SMALL_TALK = {
-            "how are you", "what's up", "whats up", "how’s it going", "hows it going",
-            "hello", "hi", "hey", "sup", "yo", "good morning", "good evening", "good night"
-        }
-        THANKS = {"thanks", "thank you", "ty", "thx", "appreciate it", "appreciate it!"}
-
-        if any(p in msg_lower for p in SMALL_TALK):
-            return {"reply": "Hey! I’m your energy coach. Ask me about cutting evening usage, shifting laundry, thermostat tips, or saving on your bill."}
-        if any(p in msg_lower for p in THANKS):
-            return {"reply": "Anytime! Want tips for tonight’s 5–10 pm window or for lowering your monthly bill?"}
-
-        if sum(ch.isalnum() for ch in msg_raw) < 2:
-            return {"reply": "Try a question like: “How can I cut my evening usage?” or “What thermostat setting saves the most?”"}
-
-        ENERGY_KEYWORDS = [
-            "energy","usage","kwh","bill","cost","evening","peak","off-peak","off peak",
-            "thermostat","ac","a/c","heater","laundry","dishwasher","oven","air fryer",
-            "lighting","lights","phantom","vampire","standby","reduce","save","savings"
-        ]
-        if not any(k in msg_lower for k in ENERGY_KEYWORDS):
-            return {"reply": "I can help with energy: ask about evening usage, thermostat, laundry timing, cooking methods, or lighting."}
-
-        tariff = float(os.getenv("TARIFF_USD_PER_KWH", "0.15"))
-        grid_intensity = float(os.getenv("GRID_INTENSITY_KG_PER_KWH", "0.40"))
-
-        # compute evening metrics from CSV
-        try:
-            if csv_processor.df is None:
-                csv_processor.load_data()
-            metrics = compute_evening_metrics_from_df(
-                csv_processor.df, req.home_id or 1, tariff, grid_intensity
-            )
-        except Exception:
-            metrics = {"evening_kwh": 0.0, "evening_cost_usd": 0.0, "evening_co2_kg": 0.0}
-
-        # Optional dashboard stats
-        try:
-            dash = csv_processor.get_dashboard_summary(req.home_id or 1)
-        except Exception:
-            dash = {}
-
-        context = {
-            "home_id": req.home_id or 1,
-            "user_message": msg_raw,
-            "conversation_history": [m.get("content", "") for m in (req.history or [])][-10:],
-            "tariff_usd_per_kwh": tariff,
-            "grid_intensity_kg_per_kwh": grid_intensity,
-            **metrics,
-            "current_power_kw": dash.get("current_power_kw"),
-            "today_usage_kwh": dash.get("today_usage_kwh"),
-            "today_cost_usd": dash.get("today_cost_usd"),
-            "today_co2_kg": dash.get("today_co2_kg"),
-            "weather": dash.get("weather"),
-            "potentials": [
-                {"name": "Dishwasher", "shift_kwh": 0.9, "note": "Run after 10 pm or use eco cycle"},
-                {"name": "Washer/Dryer", "shift_kwh": 2.0, "note": "Delay to off-peak; use low-heat dryer"},
-                {"name": "Oven → Air Fryer", "save_kwh": 0.6, "note": "Use air fryer/microwave for small meals"},
-                {"name": "Lighting", "save_kwh": 0.2, "note": "Use task lighting; turn off empty rooms"},
-                {"name": "Phantom Loads", "save_kwh": 0.15, "note": "Power strip for TV/console/chargers"},
-            ],
-        }
-
-        # First try the LLM; if it's unavailable, fall back to a simple nudge
-        try:
-            reply = chat_reply(
-                history=req.history or [],
-                persona="friendly",
-                context=context
-            )
-        except LLMUnavailable:
-            reply = build_nudge(persona="friendly", context=context)
-
-        return {"reply": reply}
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 # --------------------------
 # Health + analyze + dashboard
