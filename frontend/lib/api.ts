@@ -135,3 +135,39 @@ export async function getDevices(homeId: number | string = 1): Promise<Device[]>
     return { name: d.appliance_type, powerLabel, status, source, lastSeen }
   })
 }
+
+// lib/api.ts
+export interface ForecastPoint {
+  date: string
+  weekday: string
+  kwh: number
+  cost_usd: number
+  co2_kg: number
+}
+
+export interface WeatherForecastPoint {
+  date: string;     // 'YYYY-MM-DD'
+  weekday: string;  // 'Mon'
+  temp_c: number;
+  temp_f: number;
+}
+export async function getWeatherForecast7d(homeId: number | string = 1): Promise<WeatherForecastPoint[]> {
+  const res = await fetch(`${API_BASE_URL}/weather/forecast/7d/${homeId}`, { cache: "no-store" })
+  if (!res.ok) throw new Error(`Failed to fetch weather forecast: ${res.statusText}`)
+  const json = await res.json()
+  return json.forecast ?? []
+}
+
+
+export async function getForecast7d(homeId: number | string = 1): Promise<ForecastPoint[]> {
+  const res = await fetch(`${API_BASE_URL}/forecast/7d/${homeId}`, { cache: "no-store" })
+  if (!res.ok) throw new Error(`Failed to fetch 7d forecast: ${res.statusText}`)
+  const json = await res.json()
+  return json.forecast || []
+}
+export interface Weather {
+  temperature_f: number
+  temperature_c: number
+  indoor_temperature_c: number
+  location?: string
+}
