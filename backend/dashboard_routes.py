@@ -107,6 +107,3 @@ def get_weather(home_id: int = 1):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# Add this to your main.py:
-# from dashboard_routes import router as dashboard_router
-# app.include_router(dashboard_router)

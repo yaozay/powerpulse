@@ -24,6 +24,66 @@ export interface Weather {
   wind_speed: number | null
 }
 
+export interface Home {
+  id: number
+  name: string
+  location: string
+  data_points: number
+}
+
+export interface ChatMessage {
+  role: "user" | "assistant"
+  content: string
+}
+
+export interface ChatRequest {
+  message: string
+  home_id: number
+  history: ChatMessage[]
+}
+
+/**
+ * Send a chat message to the AI Energy Coach
+ */
+export async function sendChatMessage(
+  message: string,
+  homeId: number,
+  history: ChatMessage[] = []
+): Promise<string> {
+  const response = await fetch(`${API_BASE_URL}/chat/energy-coach`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      message,
+      home_id: homeId,
+      history: history.slice(-10), // Only send last 10 messages for context
+    }),
+  })
+
+  if (!response.ok) {
+    throw new Error(`Failed to send chat message: ${response.statusText}`)
+  }
+
+  const data = await response.json()
+  return data.reply || "I'm having trouble responding right now."
+}
+
+/**
+ * Fetch available homes from CSV
+ */
+export async function getAvailableHomes(): Promise<Home[]> {
+  const response = await fetch(`${API_BASE_URL}/dashboard/homes`)
+  
+  if (!response.ok) {
+    throw new Error(`Failed to fetch homes: ${response.statusText}`)
+  }
+  
+  const data = await response.json()
+  return data.homes || []
+}
+
 /**
  * Fetch all dashboard metrics for a home
  */
