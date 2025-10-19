@@ -182,8 +182,7 @@ def energy_coach(req: ChatReq):
         except Exception:
             metrics = {"evening_kwh": 0.0, "evening_cost_usd": 0.0, "evening_co2_kg": 0.0}
 
-        # You can also grab dashboard aggregates to enrich chat responses
-        # (these are optional; chat_with_energy_data will ignore missing fields)
+        # Optional: broader stats for better answers
         try:
             dash = csv_processor.get_dashboard_summary(req.home_id or 1)
         except Exception:
@@ -196,7 +195,6 @@ def energy_coach(req: ChatReq):
             "tariff_usd_per_kwh": tariff,
             "grid_intensity_kg_per_kwh": grid_intensity,
             **metrics,
-            # Optional broader stats for better answers
             "current_power_kw": dash.get("current_power_kw"),
             "today_usage_kwh": dash.get("today_usage_kwh"),
             "today_cost_usd": dash.get("today_cost_usd"),
@@ -213,13 +211,12 @@ def energy_coach(req: ChatReq):
 
         # --- route by intent ---
         if wants_nudge:
-            # explicit “one tip” -> short nudge
             reply = build_nudge(persona="friendly", context=context)
         elif is_question:
-            # natural questions -> fuller chat answer that uses the actual message + history
             reply = chat_with_energy_data(context)
+            if reply.strip().startswith("I'm having trouble connecting"):
+                reply = build_nudge(persona="friendly", context=context)
         else:
-            # energy-related but not an explicit question -> give a concise nudge by default
             reply = build_nudge(persona="friendly", context=context)
 
         return {"reply": reply}
@@ -233,6 +230,17 @@ def energy_coach(req: ChatReq):
 @app.get("/health")
 def health():
     return {"ok": True, "csv_loaded": csv_processor.df is not None}
+
+@app.get("/homes/{home_id}/devices")
+def get_devices(home_id: int = 1):
+    try:
+        devices = csv_processor.get_devices(home_id)
+        print(f"[devices] home_id={home_id} -> {len(devices)} devices")
+        return {"home_id": home_id, "devices": devices}
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="CSV data file not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ============= ORIGINAL ANALYZE ENDPOINT =============
 @app.post("/analyze", response_model=AnalyzeResp)
@@ -315,9 +323,7 @@ def analyze(req: AnalyzeReq):
 @app.get("/dashboard/metrics")
 @app.get("/dashboard/metrics/{home_id}")
 def get_dashboard_metrics(home_id: int = 1):
-    """
-    Get all dashboard metrics from CSV data
-    """
+    """Get all dashboard metrics from CSV data"""
     try:
         if csv_processor.df is None:
             csv_processor.load_data()

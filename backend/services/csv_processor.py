@@ -1,12 +1,73 @@
 import os
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone 
 from pathlib import Path
+from typing import List, Dict   
 
 class EnergyDataProcessor:
     """
     Processes energy consumption CSV data and calculates dashboard metrics
     """
+
+    def get_devices(self, home_id: int) -> List[Dict]:
+        """
+        Return latest snapshot per appliance for a home:
+          - appliance_type
+          - last_kwh
+          - last_seen_iso (ISO 8601)
+          - device_smartness ('Smart' | 'Not Smart' | 'Unknown')
+          - is_online (True if last seen within 24h)
+        """
+        if self.df is None:
+            self.load_data()
+
+        df = self.df[self.df['Home ID'] == home_id].copy()
+        if df.empty:
+            return []
+
+        # Ensure expected columns exist
+        for col in ["Appliance Type", "Energy Consumption (kWh)", "Device Smartness", "datetime"]:
+            if col not in df.columns:
+                raise ValueError(f"Missing column in CSV: {col}")
+
+        # Sort newest first within each appliance then take first row per appliance
+        df = df.sort_values(["Appliance Type", "datetime"], ascending=[True, False])
+        latest = df.groupby("Appliance Type", as_index=False).first()
+
+        now = datetime.now(timezone.utc)
+        out: List[Dict] = []
+        for _, row in latest.iterrows():
+            dt = row["datetime"]
+            # treat existing naive timestamps as UTC for consistency
+            if isinstance(dt, datetime) and dt.tzinfo is None:
+                dt_utc = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt_utc = dt
+
+            last_seen_iso = dt_utc.isoformat() if isinstance(dt_utc, datetime) else None
+            is_online = False
+            if isinstance(dt_utc, datetime):
+                is_online = (now - dt_utc) <= timedelta(hours=24)
+
+            smart_raw = str(row.get("Device Smartness", "Unknown")).strip()
+            smart = smart_raw if smart_raw in ("Smart", "Not Smart", "Unknown") else "Unknown"
+
+            try:
+                last_kwh = round(float(row.get("Energy Consumption (kWh)", 0.0)), 3)
+            except Exception:
+                last_kwh = 0.0
+
+            out.append({
+                "appliance_type": str(row["Appliance Type"]).strip(),
+                "last_kwh": last_kwh,
+                "last_seen_iso": last_seen_iso,
+                "device_smartness": smart,
+                "is_online": is_online,
+            })
+
+        # Stable sort for UI
+        out.sort(key=lambda d: d["appliance_type"].lower())
+        return out
     
     def __init__(self, csv_path: str = None):
         # Handle relative paths from services/ directory
@@ -25,6 +86,11 @@ class EnergyDataProcessor:
             raise FileNotFoundError(f"CSV file not found at {self.csv_path}")
         
         self.df = pd.read_csv(self.csv_path)
+
+        if 'Home ID' in self.df.columns:
+            self.df['Home ID'] = pd.to_numeric(self.df['Home ID'], errors='coerce').astype('Int64')
+
+        self.df['datetime'] = pd.to_datetime(self.df['Date'] + ' ' + self.df['Time'], format='%m/%d/%y %H:%M')
         
         # Parse datetime
         self.df['datetime'] = pd.to_datetime(
@@ -218,3 +284,5 @@ if __name__ == "__main__":
             
     except Exception as e:
         print(f"Error: {e}")
+
+        
