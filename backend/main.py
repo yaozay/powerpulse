@@ -66,6 +66,18 @@ def get_devices(home_id: int = 1):
         raise HTTPException(status_code=500, detail=str(e))
     
 
+@app.get("/homes/{home_id}/devices/{appliance}/stats")
+def get_device_stats(home_id: int, appliance: str):
+    try:
+        # FastAPI already URL-decodes path params; no need for unquote
+        stats = csv_processor.get_device_stats(home_id, appliance)
+        return stats  # modal expects fields like daily_kwh, monthly_kwh, etc.
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="CSV data file not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+    
 # ============= ORIGINAL ANALYZE ENDPOINT =============
 @app.post("/analyze", response_model=AnalyzeResp)
 def analyze(req: AnalyzeReq):

@@ -24,6 +24,14 @@ export interface Weather {
   wind_speed: number | null
 }
 
+export type DeviceStats = {
+  appliance_type: string
+  daily_kwh: number
+  monthly_kwh: number
+  avg_runtime_hours: number
+  peak_hour: string | null
+}
+
 /**
  * Fetch all dashboard metrics for a home
  */
@@ -31,6 +39,15 @@ export async function getDashboardMetrics(homeId: number = 1): Promise<Dashboard
   const response = await fetch(`${API_BASE_URL}/dashboard/metrics/${homeId}`)
   if (!response.ok) throw new Error(`Failed to fetch dashboard metrics: ${response.statusText}`)
   return response.json()
+}
+
+export async function getDeviceStats(homeId: number | string, applianceName: string) {
+  const res = await fetch(
+    `${API_BASE_URL}/homes/${homeId}/devices/${encodeURIComponent(applianceName)}/stats`,
+    { cache: "no-store" }
+  )
+  if (!res.ok) throw new Error(`Failed to fetch device stats: ${res.statusText}`)
+  return res.json()
 }
 
 /**
