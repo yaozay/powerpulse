@@ -13,8 +13,12 @@ type ChatMessage = {
   content: string
 }
 
-const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
-const COACH_CHAT_ENDPOINT = `${API_BASE}/coach/chat`;
+type CoachSectionProps = {
+  homeId?: number
+}
+
+const API_BASE = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").replace(/\/$/, "")
+const ENERGY_COACH_ENDPOINT = `${API_BASE}/chat/energy-coach`
 
 const suggestions = [
   {
@@ -29,13 +33,13 @@ const suggestions = [
     icon: TrendingDown,
     title: "Reduce Peak Usage",
     message:
-      "Your energy usage peaks between 6-8 PM. Try running your dishwasher and laundry during off-peak hours to save on costs.",
+      "Your energy usage peaks between 6–8 PM. Run dishwasher and laundry during off-peak hours to lower costs.",
     color: "text-secondary",
     bgColor: "bg-secondary/10",
   },
 ]
 
-export function CoachSection() {
+export function CoachSection({ homeId = 1 }: CoachSectionProps) {
   const leftColumn = suggestions
   const chatCard = {
     icon: Bot,
@@ -62,65 +66,56 @@ export function CoachSection() {
     endRef.current?.scrollIntoView({ behavior: "smooth" })
   }, [messages, isThinking])
 
-  const sendToCoach = async (history: ChatMessage[]): Promise<string> => {
-  try {
-    // 1) Sanitize payload: removes undefined / non-JSON-serializable bits safely
-    const payload = {
-      messages: history.map(m => ({
-        role: m.role === "assistant" ? "assistant" : "user", // normalize
-        content: String(m.content ?? "")
-      })),
-      persona: "eco",
-      context: {} // include an explicit context to satisfy stricter backends
-    };
-    // Drop any undefined by a round-trip
-    const safeBody = JSON.stringify(JSON.parse(JSON.stringify(payload)));
+  // --- call your backend /chat/energy-coach (expects {message, home_id, history} -> {reply}) ---
+  const sendToCoach = async (history: ChatMessage[], latestUserText: string): Promise<string> => {
+    try {
+      // Build the payload exactly as your backend expects
+      const safeHistory = history.map(m => ({ role: m.role, content: String(m.content ?? "") }))
 
-    const res = await fetch(COACH_CHAT_ENDPOINT, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Accept": "application/json"
-      },
-      body: safeBody,
-    });
+      const res = await fetch(ENERGY_COACH_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Accept": "application/json" },
+        body: JSON.stringify({
+          message: latestUserText,
+          home_id: homeId,
+          history: safeHistory.slice(-10), // keep last 10 for context
+        }),
+      })
 
-    if (!res.ok) {
-      // 2) Log exact server text so you can see where JSON parsing failed
-      const errText = await res.text();
-      console.error("Coach reply failed:", res.status, errText);
-      throw new Error(`Coach reply failed with status ${res.status}`);
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "")
+        console.error("Energy coach error:", res.status, errText)
+        throw new Error(`Energy coach ${res.status}`)
+      }
+
+      const data = await res.json().catch(async () => {
+        const txt = await res.text().catch(() => "")
+        console.error("Non-JSON response:", txt)
+        return {}
+      })
+
+      const reply: string = typeof data?.reply === "string" ? data.reply.trim() : ""
+      return reply || "Sorry—no reply received."
+    } catch (e) {
+      console.error("Coach chat error", e)
+      return "Sorry—something went wrong sending that."
     }
-
-    const data = await res.json().catch(async () => {
-      // If server didn’t return JSON, show raw body for debugging
-      const txt = await res.text();
-      console.error("Non-JSON server response:", txt);
-      return { message: "" };
-    });
-
-    const message = typeof data?.message === "string" ? data.message.trim() : "";
-    return message || "Sorry—no reply received.";
-  } catch (error) {
-    console.error("Coach chat error", error);
-    return "Sorry—something went wrong sending that.";
   }
-};
-
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const text = draft.trim()
-    if (!text) return
+    if (!text || isThinking) return
 
+    // Update UI immediately
     const nextHistory: ChatMessage[] = [...messages, { role: "user", content: text }]
     setMessages(nextHistory)
     setDraft("")
     setIsThinking(true)
 
     try {
-      const reply = await sendToCoach(nextHistory)
-      setMessages((prev) => [...prev, { role: "assistant", content: reply }])
+      const reply = await sendToCoach(nextHistory, text)
+      setMessages(prev => [...prev, { role: "assistant", content: reply }])
     } finally {
       setIsThinking(false)
     }
@@ -134,6 +129,7 @@ export function CoachSection() {
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-stretch">
+        {/* Left: two stacked suggestion panes */}
         <div className="grid gap-4 sm:grid-cols-2 lg:h-[520px] lg:grid-cols-1 lg:grid-rows-2">
           {leftColumn.map((suggestion) => {
             const Icon = suggestion.icon
@@ -141,12 +137,7 @@ export function CoachSection() {
               <Card key={suggestion.title} className="transition-shadow hover:shadow-lg lg:flex lg:h-full lg:flex-col">
                 <CardContent className="flex flex-1 flex-col pt-6">
                   <div className="mb-4 flex items-start gap-4">
-                    <div
-                      className={cn(
-                        "flex h-10 w-10 shrink-0 items-center justify-center rounded-lg",
-                        suggestion.bgColor
-                      )}
-                    >
+                    <div className={cn("flex h-10 w-10 shrink-0 items-center justify-center rounded-lg", suggestion.bgColor)}>
                       <Icon className={cn("h-5 w-5", suggestion.color)} />
                     </div>
                     <div className="flex-1">
@@ -155,9 +146,7 @@ export function CoachSection() {
                     </div>
                   </div>
                   <div className="mt-auto flex gap-2">
-                    <Button size="sm" variant="outline">
-                      Snooze
-                    </Button>
+                    <Button size="sm" variant="outline">Snooze</Button>
                     <Button size="sm">Apply</Button>
                   </div>
                 </CardContent>
@@ -166,16 +155,12 @@ export function CoachSection() {
           })}
         </div>
 
+        {/* Right: chat card */}
         {FeatureIcon && (
           <Card className="transition-shadow hover:shadow-lg min-h-0 lg:flex lg:h-[520px] lg:max-h-[520px] lg:flex-col">
             <CardContent className="flex h-full min-h-0 flex-col pt-6">
               <div className="mb-6 flex items-start gap-4">
-                <div
-                  className={cn(
-                    "flex h-12 w-12 shrink-0 items-center justify-center rounded-lg",
-                    chatCard.bgColor
-                  )}
-                >
+                <div className={cn("flex h-12 w-12 shrink-0 items-center justify-center rounded-lg", chatCard.bgColor)}>
                   <FeatureIcon className={cn("h-6 w-6", chatCard.color)} />
                 </div>
                 <div>
@@ -183,6 +168,7 @@ export function CoachSection() {
                   <p className="text-base leading-relaxed text-muted-foreground">{chatCard.message}</p>
                 </div>
               </div>
+
               <ScrollArea className="flex-1 min-h-0 pr-2">
                 <div className="space-y-4 pb-2">
                   {messages.map((message, index) => (
@@ -212,6 +198,7 @@ export function CoachSection() {
                   <div ref={endRef} />
                 </div>
               </ScrollArea>
+
               <form onSubmit={handleSubmit} className="mt-4 flex flex-col gap-3">
                 <Textarea
                   placeholder="Ask about peak rates, thermostat tweaks, or appliance schedules…"
@@ -221,11 +208,7 @@ export function CoachSection() {
                   className="resize-none"
                 />
                 <div className="flex justify-end gap-2">
-                  <Button
-                    type="submit"
-                    size="sm"
-                    disabled={isThinking || draft.trim().length === 0}
-                  >
+                  <Button type="submit" size="sm" disabled={isThinking || draft.trim().length === 0}>
                     {isThinking ? "Working…" : "Send"}
                   </Button>
                 </div>
