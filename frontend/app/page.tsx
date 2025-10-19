@@ -14,7 +14,7 @@ export default function Home() {
         <NowSection />
         <ForecastSection />
         <DevicesSection />
-        <CoachSection />
+        <CoachSection homeId={1} /> 
       </main>
     </div>
   )
