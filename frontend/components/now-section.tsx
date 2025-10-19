@@ -69,7 +69,7 @@ export function NowSection() {
             <CardTitle>Energy Usage (24h)</CardTitle>
           </CardHeader>
           <CardContent>
-            <EnergyChart />
+            <EnergyChart homeId="1"/>
           </CardContent>
         </Card>
 
