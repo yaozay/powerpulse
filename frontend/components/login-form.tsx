@@ -1,9 +1,7 @@
 "use client"
-
-import type React from "react"
-
 import { useState } from "react"
 import { useRouter } from "next/navigation"
+import { useSignIn } from "@clerk/nextjs"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -11,20 +9,39 @@ import { Card } from "@/components/ui/card"
 
 export function LoginForm() {
   const router = useRouter()
+  const { isLoaded, signIn, setActive } = useSignIn()
+
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
   const [isLoading, setIsLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    setIsLoading(true)
+    if (!isLoaded) return
 
-    // Simulate login - in production, this would call your auth API
-    setTimeout(() => {
-      localStorage.setItem("powerpulse_auth", "true")
-      localStorage.setItem("powerpulse_email", email)
-      router.push("/")
-    }, 1000)
+    setIsLoading(true)
+    setError(null)
+
+    try {
+      const result = await signIn.create({
+        identifier: email,
+        password,
+      })
+
+      if (result.status === "complete") {
+        await setActive({ session: result.createdSessionId })
+        router.push("/") // redirect after login
+      } else {
+        console.log("Additional verification required:", result)
+      }
+    } catch (err: any) {
+      const firstError =
+        err.errors?.[0]?.longMessage || err.message || "Something went wrong"
+      setError(firstError)
+    } finally {
+      setIsLoading(false)
+    }
   }
 
   return (
@@ -41,6 +58,7 @@ export function LoginForm() {
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             required
+            disabled={isLoading}
             className="h-11"
           />
         </div>
@@ -50,9 +68,9 @@ export function LoginForm() {
             <Label htmlFor="password" className="text-sm font-medium">
               Password
             </Label>
-            <button type="button" className="text-sm text-primary hover:underline">
+            <a href="/forgot-password" className="text-sm text-primary hover:underline">
               Forgot password?
-            </button>
+            </a>
           </div>
           <Input
             id="password"
@@ -61,19 +79,26 @@ export function LoginForm() {
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             required
+            disabled={isLoading}
             className="h-11"
           />
         </div>
+
+        {error && (
+          <p role="alert" className="text-sm text-red-500">
+            {error}
+          </p>
+        )}
 
         <Button type="submit" className="h-11 w-full font-medium" disabled={isLoading}>
           {isLoading ? "Signing in..." : "Sign in"}
         </Button>
 
         <div className="text-center text-sm text-muted-foreground">
-          Don't have an account?{" "}
-          <button type="button" className="text-primary hover:underline">
+          Don&apos;t have an account?{" "}
+          <a href="/sign-up" className="text-primary hover:underline">
             Sign up
-          </button>
+          </a>
         </div>
       </form>
     </Card>

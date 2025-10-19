@@ -1,18 +1,11 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { Zap, LogOut, User } from "lucide-react"
+import { Zap } from "lucide-react"
 import Link from "next/link"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
+import { SignedIn, SignedOut, UserButton, useUser } from "@clerk/nextjs"
 
 const navItems = [
   { id: "now", label: "Now" },
@@ -23,8 +16,7 @@ const navItems = [
 
 export function Navigation() {
   const [activeSection, setActiveSection] = useState("now")
-  const [isAuthenticated, setIsAuthenticated] = useState(false)
-  const [userEmail, setUserEmail] = useState("")
+  const { user } = useUser()
 
   useEffect(() => {
     const handleScroll = () => {
@@ -35,7 +27,10 @@ export function Navigation() {
         const element = document.getElementById(section)
         if (element) {
           const { offsetTop, offsetHeight } = element
-          if (scrollPosition >= offsetTop && scrollPosition < offsetTop + offsetHeight) {
+          if (
+            scrollPosition >= offsetTop &&
+            scrollPosition < offsetTop + offsetHeight
+          ) {
             setActiveSection(section)
             break
           }
@@ -45,15 +40,6 @@ export function Navigation() {
 
     window.addEventListener("scroll", handleScroll)
     return () => window.removeEventListener("scroll", handleScroll)
-  }, [])
-
-  useEffect(() => {
-    const authToken = localStorage.getItem("powerpulse_auth")
-    const email = localStorage.getItem("powerpulse_email")
-    if (authToken && email) {
-      setIsAuthenticated(true)
-      setUserEmail(email)
-    }
   }, [])
 
   const scrollToSection = (id: string) => {
@@ -68,17 +54,11 @@ export function Navigation() {
     }
   }
 
-  const handleLogout = () => {
-    localStorage.removeItem("powerpulse_auth")
-    localStorage.removeItem("powerpulse_email")
-    setIsAuthenticated(false)
-    setUserEmail("")
-  }
-
   return (
     <nav className="sticky top-0 z-50 border-b border-border/40 bg-background/80 backdrop-blur-lg">
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
         <div className="flex h-16 items-center justify-between">
+          {/* Logo */}
           <div className="flex items-center gap-2">
             <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary">
               <Zap className="h-5 w-5 text-primary-foreground" />
@@ -86,6 +66,7 @@ export function Navigation() {
             <span className="text-xl font-semibold">PowerPulse</span>
           </div>
 
+          {/* Nav buttons + Auth */}
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-2 rounded-full bg-muted p-1">
               {navItems.map((item) => (
@@ -104,29 +85,23 @@ export function Navigation() {
               ))}
             </div>
 
-            {isAuthenticated ? (
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="ghost" size="icon" className="h-9 w-9 rounded-xl">
-                    <User className="h-4 w-4" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-56">
-                  <DropdownMenuLabel>My Account</DropdownMenuLabel>
-                  <DropdownMenuSeparator />
-                  <div className="px-2 py-1.5 text-sm text-muted-foreground">{userEmail}</div>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem onClick={handleLogout}>
-                    <LogOut className="mr-2 h-4 w-4" />
-                    Logout
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            ) : (
+            {/* Signed in → show user info + logout */}
+            <SignedIn>
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-muted-foreground">
+                  {user?.firstName || user?.emailAddresses[0]?.emailAddress}
+                </span>
+
+                <UserButton afterSignOutUrl="/" />
+              </div>
+            </SignedIn>
+
+            {/* Signed out → show login button */}
+            <SignedOut>
               <Button asChild variant="default" size="sm" className="rounded-xl">
                 <Link href="/login">Login</Link>
               </Button>
-            )}
+            </SignedOut>
           </div>
         </div>
       </div>
