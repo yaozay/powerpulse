@@ -10,6 +10,183 @@ class EnergyDataProcessor:
     Processes energy consumption CSV data and calculates dashboard metrics
     """
 
+   
+    def get_7d_forecast(self, home_id: int = 1):
+        """
+        7-day forecast using:
+          - Weekday average from the last ~8 weeks (seasonality)
+          - Simple linear trend from the last ~28 days (direction)
+        Combines them additively:
+            forecast = weekday_avg + (trend_pred - recent_mean)
+        """
+        if self.df is None:
+            self.load_data()
+
+        df = self.df[self.df["Home ID"] == home_id].copy()
+        today = datetime.now().date()
+
+        # No data -> zeros
+        if df.empty:
+            return [
+                {"date": (today + timedelta(days=i+1)).isoformat(),
+                 "weekday": (today + timedelta(days=i+1)).strftime("%a"),
+                 "kwh": 0.0, "cost_usd": 0.0, "co2_kg": 0.0}
+                for i in range(7)
+            ]
+
+        # --- Daily totals ---
+        df["date"] = df["datetime"].dt.date
+        daily = df.groupby("date", as_index=False)["Energy Consumption (kWh)"].sum()
+        daily.rename(columns={"Energy Consumption (kWh)": "kwh"}, inplace=True)
+        daily = daily.sort_values("date")
+
+        # --- Weekday seasonality (use last ~8 weeks if available) ---
+        cutoff8w = pd.Timestamp(today - timedelta(days=56)).date()
+        hist8 = daily[daily["date"] >= cutoff8w].copy()
+        if hist8.empty:
+            hist8 = daily.copy()
+        hist8["weekday_idx"] = pd.to_datetime(hist8["date"]).dt.weekday  # 0=Mon
+        weekday_avg = hist8.groupby("weekday_idx")["kwh"].mean()
+        overall_mean = float(hist8["kwh"].mean()) if not hist8.empty else float(daily["kwh"].mean())
+
+        # --- Trend (simple linear regression over last ~28 days) ---
+        cutoff4w = pd.Timestamp(today - timedelta(days=28)).date()
+        hist4 = daily[daily["date"] >= cutoff4w].copy()
+        if hist4.empty:
+            hist4 = daily.copy()
+
+        # x = 0..n-1, y = kwh
+        y = hist4["kwh"].to_numpy(dtype=float)
+        x = np.arange(len(y), dtype=float)
+        if len(y) >= 2:
+            slope, intercept = np.polyfit(x, y, 1)
+        else:
+            slope, intercept = 0.0, float(y.mean()) if len(y) else 0.0
+
+        # average tariff & CO2 factor
+        if "Tariff ($/kWh)" in df.columns:
+            tariff = float(df["Tariff ($/kWh)"].dropna().mean() or 0.12)
+        else:
+            tariff = 0.12
+
+        out = []
+        n0 = len(y)  # next x index starts after the last observed day
+        for i in range(1, 8):
+            d = today + timedelta(days=i)
+            wd = d.weekday()
+
+            # Seasonal baseline
+            wd_avg = float(weekday_avg.get(wd, overall_mean))
+
+            # Trend prediction for that future day
+            trend_pred = float(intercept + slope * (n0 + i))
+
+            # Combine (additive): shift weekday baseline by trend deviation from mean
+            kwh = wd_avg + (trend_pred - overall_mean)
+            kwh = max(0.0, round(kwh, 2))
+
+            cost = round(kwh * tariff, 2)
+            co2 = round(kwh * self.grid_emissions_kg_per_kwh, 2)
+
+            out.append({
+                "date": d.isoformat(),
+                "weekday": d.strftime("%a"),
+                "kwh": kwh,
+                "cost_usd": cost,
+                "co2_kg": co2,
+            })
+        return out  
+    
+    def get_weather_data(self, home_id: int = 1):
+        if self.df is None:
+            self.load_data()
+
+        df = self.df
+        if 'Home ID' in df.columns:
+            home_df = df[df['Home ID'] == home_id].copy()
+        else:
+            home_df = df.copy()
+
+        if home_df.empty:
+            return {
+                "temperature_f": 0,
+                "temperature_c": 0,
+                "indoor_temperature_c": 0,
+                "location": f"Home {home_id} (No data)",
+            }
+
+        latest = home_df.sort_values("datetime", ascending=False).iloc[0]
+
+        city   = str(latest.get("Location City", "") or "").strip()
+        region = str(latest.get("Location Region", "") or "").strip()
+        # fallback to most frequent values if latest is blank
+        if not city and "Location City" in home_df.columns and not home_df["Location City"].dropna().empty:
+            city = str(home_df["Location City"].mode().iloc[0]).strip()
+        if not region and "Location Region" in home_df.columns and not home_df["Location Region"].dropna().empty:
+            region = str(home_df["Location Region"].mode().iloc[0]).strip()
+
+        location = ", ".join([p for p in (city, region) if p]) or f"Home {home_id}"
+
+        out_c = float(latest.get("Outdoor Temperature (C)", 0) or 0)
+        in_c  = float(latest.get("Indoor Temperature (C)", 0) or 0)
+        temp_f = (out_c * 9/5) + 32
+
+        return {
+            "temperature_f": round(temp_f),
+            "temperature_c": round(out_c, 1),
+            "indoor_temperature_c": round(in_c, 1),
+            "location": location,
+        }
+
+    def get_weather_forecast_7d(self, home_id: int = 1):
+        if self.df is None:
+            self.load_data()
+
+        df = self.df[self.df["Home ID"] == home_id].copy()
+        if df.empty or "Outdoor Temperature (C)" not in df.columns:
+            today = datetime.now().date()
+            return [{
+                "date": (today + timedelta(days=i+1)).isoformat(),
+                "weekday": (today + timedelta(days=i+1)).strftime("%a"),
+                "temp_c": 0.0,
+                "temp_f": 32.0,
+            } for i in range(7)]
+
+        if "datetime" not in df.columns or not pd.api.types.is_datetime64_any_dtype(df["datetime"]):
+            df["datetime"] = pd.to_datetime(
+                df["Date"].astype(str) + " " + df["Time"].astype(str),
+                format="%m/%d/%y %H:%M",
+                errors="coerce"
+            )
+
+        df = df.dropna(subset=["datetime"]).copy()
+        df["date"] = df["datetime"].dt.date
+
+        daily = df.groupby("date", as_index=False)["Outdoor Temperature (C)"].mean()
+        daily = daily.rename(columns={"Outdoor Temperature (C)": "temp_c"})
+
+        cutoff = pd.Timestamp(datetime.now() - timedelta(days=56)).date()
+        hist = daily[daily["date"] >= cutoff].copy()
+        if hist.empty:
+            hist = daily.copy()
+
+        hist["weekday_idx"] = pd.to_datetime(hist["date"]).dt.weekday
+        weekday_avg_c = hist.groupby("weekday_idx")["temp_c"].mean()
+        fallback = float(hist["temp_c"].mean() if not hist.empty else 0.0)
+
+        today = datetime.now().date()
+        out = []
+        for i in range(1, 8):
+            d = today + timedelta(days=i)
+            c = float(weekday_avg_c.get(d.weekday(), fallback))
+            out.append({
+                "date": d.isoformat(),
+                "weekday": d.strftime("%a"),
+                "temp_c": round(c, 1),
+                "temp_f": round((c * 9/5) + 32),
+            })
+        return out
+    
     def get_device_stats(self, home_id: int, appliance_type: str) -> dict:
         if self.df is None:
             self.load_data()
@@ -172,10 +349,23 @@ class EnergyDataProcessor:
 
         self.df['datetime'] = pd.to_datetime(self.df['Date'] + ' ' + self.df['Time'], format='%m/%d/%y %H:%M')
         
+        self.df.columns = self.df.columns.astype(str).str.strip()
+        if 'Location City' in self.df.columns:
+            self.df['Location City'] = self.df['Location City'].astype(str).str.strip()
+        if 'Location Region' in self.df.columns:
+            self.df['Location Region'] = self.df['Location Region'].astype(str).str.strip()
+        if 'Home ID' in self.df.columns:
+            self.df['Home ID'] = pd.to_numeric(self.df['Home ID'], errors='coerce').astype('Int64')
+        self.df['datetime'] = pd.to_datetime(
+            self.df['Date'].astype(str).str.strip() + ' ' + self.df['Time'].astype(str).str.strip(),
+            format='%m/%d/%y %H:%M', errors='coerce'
+        )
+
         # Parse datetime
         self.df['datetime'] = pd.to_datetime(
-            self.df['Date'] + ' ' + self.df['Time'], 
-            format='%m/%d/%y %H:%M'
+            self.df['Date'].astype(str) + ' ' + self.df['Time'].astype(str),
+            format='%m/%d/%y %H:%M',
+            errors='coerce'
         )
         
         # Convert boolean columns

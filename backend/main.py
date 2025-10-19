@@ -414,6 +414,52 @@ def get_available_homes():
         return {"homes": homes}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+@app.get("/forecast/7d/{home_id}")
+def forecast_7d(home_id: int = 1):
+    try:
+        data = csv_processor.get_7d_forecast(home_id)
+        return {"home_id": home_id, "forecast": data}
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="CSV data file not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@app.get("/dashboard/weather/{home_id}")
+def get_weather_info(home_id: int = 1):
+    try:
+        weather = csv_processor.get_weather_data(home_id)
+        if weather is None:
+            raise HTTPException(status_code=404, detail="No weather data")
+        # Safety net: attach location if not present
+        if "location" not in weather:
+            if csv_processor.df is None:
+                csv_processor.load_data()
+            df = csv_processor.df
+            df = df[df["Home ID"] == home_id] if "Home ID" in df.columns else df
+            if not df.empty:
+                # use most recent row
+                row = df.sort_values("datetime", ascending=False).iloc[0]
+                city = str(row.get("Location City", "") or "").strip()
+                region = str(row.get("Location Region", "") or "").strip()
+                loc = ", ".join([p for p in (city, region) if p]) or f"Home {home_id}"
+                weather["location"] = loc
+            else:
+                weather["location"] = f"Home {home_id}"
+        return weather
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/weather/forecast/7d/{home_id}")
+def get_weather_forecast_7d(home_id: int = 1):
+    try:
+        data = csv_processor.get_weather_forecast_7d(home_id)
+        return {"home_id": home_id, "forecast": data}
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="CSV data file not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # --------------------------
 # Entrypoint
