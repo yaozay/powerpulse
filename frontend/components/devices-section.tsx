@@ -37,7 +37,7 @@ function pickIcon(name: string): LucideIcon {
   return hit?.Icon ?? HousePlug
 }
 
-export function DevicesSection({ homeId = 1 }: { homeId?: number | string }) {
+export function DevicesSection({ homeId = 2 }: { homeId?: number | string }) {
   const [devices, setDevices] = useState<Device[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -179,10 +179,11 @@ export function DevicesSection({ homeId = 1 }: { homeId?: number | string }) {
       />
 
       <DeviceDetailsModal
-        open={isDetailsModalOpen}
-        onOpenChange={setIsDetailsModalOpen}
-        device={selectedDevice}
-      />
+          open={isDetailsModalOpen}
+          onOpenChange={setIsDetailsModalOpen}
+          device={selectedDevice}
+          homeId={homeId}
+        />
     </section>
   )
 }

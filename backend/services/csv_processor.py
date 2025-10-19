@@ -2,12 +2,92 @@ import os
 import pandas as pd
 from datetime import datetime, timedelta, timezone 
 from pathlib import Path
-from typing import List, Dict   
+from typing import List, Dict  
+import numpy as np 
 
 class EnergyDataProcessor:
     """
     Processes energy consumption CSV data and calculates dashboard metrics
     """
+
+    def get_device_stats(self, home_id: int, appliance_type: str) -> dict:
+        if self.df is None:
+            self.load_data()
+
+        df_home = self.df[self.df["Home ID"] == home_id].copy()
+        if df_home.empty:
+            return {"appliance_type": appliance_type, "daily_kwh": 0.0, "monthly_kwh": 0.0,
+                    "avg_runtime_hours": 0.0, "peak_hour": None}
+
+        # Normalize labels once
+        df_home["__appliance_norm"] = df_home["Appliance Type"].astype(str).str.strip().str.casefold()
+        target_norm = str(appliance_type).strip().casefold()
+
+        # 1) exact (case-insensitive) match
+        df = df_home[df_home["__appliance_norm"] == target_norm]
+
+        # 2) partial match (target in csv label OR csv label in target)
+        if df.empty:
+            contains1 = df_home["__appliance_norm"].str.contains(rf"\b{target_norm}\b", na=False)
+            contains2 = contains1 | df_home["__appliance_norm"].apply(lambda s: target_norm in s)
+            df = df_home[contains2]
+
+        # 3) closest string (Levenshtein-lite)
+        if df.empty:
+            candidates = df_home["__appliance_norm"].unique().tolist()
+            best = difflib.get_close_matches(target_norm, candidates, n=1, cutoff=0.6)
+            if best:
+                df = df_home[df_home["__appliance_norm"] == best[0]]
+
+        if df.empty:
+            return {"appliance_type": appliance_type, "daily_kwh": 0.0, "monthly_kwh": 0.0,
+                    "avg_runtime_hours": 0.0, "peak_hour": None}
+
+        # Keep original label for display
+        label = str(df["Appliance Type"].iloc[0]).strip()
+
+        # Chrono helpers
+        df = df.sort_values("datetime")
+        df["date"] = df["datetime"].dt.date
+        df["year"] = df["datetime"].dt.year
+        df["month"] = df["datetime"].dt.month
+
+        # Daily (latest day)
+        latest_date = df["date"].max()
+        daily_kwh = float(df.loc[df["date"] == latest_date, "Energy Consumption (kWh)"].sum())
+
+        # Monthly (month of latest reading)
+        latest_year, latest_month = int(df.iloc[-1]["year"]), int(df.iloc[-1]["month"])
+        monthly_kwh = float(
+            df.loc[(df["year"] == latest_year) & (df["month"] == latest_month), "Energy Consumption (kWh)"].sum()
+        )
+
+        # Avg runtime = (#active samples) * (median sampling interval)
+        active_mask = df["Energy Consumption (kWh)"] > 0.01
+        diffs = df["datetime"].diff().dropna()
+        median_interval_hours = (np.median(diffs.dt.total_seconds()) / 3600.0) if not diffs.empty else 0.0
+        avg_runtime_hours = float(active_mask.sum() * median_interval_hours)
+
+        # Peak hour (prefer last 30d)
+        horizon_start = df["datetime"].max() - timedelta(days=30)
+        recent = df[df["datetime"] >= horizon_start]
+        if recent.empty:
+            recent = df
+        recent = recent.copy()
+        recent["hour"] = recent["datetime"].dt.hour
+        hour_means = recent.groupby("hour")["Energy Consumption (kWh)"].mean()
+        peak_hour = None
+        if not hour_means.empty:
+            h = int(hour_means.idxmax())
+            peak_hour = f"{h:02d}:00–{(h+1)%24:02d}:00"
+
+        return {
+            "appliance_type": label,
+            "daily_kwh": round(daily_kwh, 3),
+            "monthly_kwh": round(monthly_kwh, 3),
+            "avg_runtime_hours": round(avg_runtime_hours, 2),
+            "peak_hour": peak_hour,
+        }
 
     def get_devices(self, home_id: int) -> List[Dict]:
         """
