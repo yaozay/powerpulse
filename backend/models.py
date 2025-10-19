@@ -2,10 +2,10 @@ from pydantic import BaseModel
 from typing import List, Literal
 
 class AnalyzeReq(BaseModel):
-    indoor: dict | None = None   # {"tempC": 26, "rh": 60}
-    home: dict | None = None     # {"size":"medium","acKw":2.5}
-    prefs: dict | None = None    # {"comfort":"eco","maxTempC":25}
-    location: dict               # {"lat": 29.76, "lng": -95.37}
+    indoor: dict | None = None 
+    home: dict | None = None   
+    prefs: dict | None = None  
+    location: dict             
 
 class SeriesPoint(BaseModel):
     ts: str
@@ -30,3 +30,18 @@ class AnalyzeResp(BaseModel):
     events: List[Event]
     summary: dict
     nudge: str
+
+
+class CoachChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+
+class CoachChatReq(BaseModel):
+    messages: List[CoachChatMessage]
+    persona: Literal["eco", "budget", "comfort"] | None = None
+    context: dict | None = None
+
+
+class CoachChatResp(BaseModel):
+    message: str

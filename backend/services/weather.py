@@ -14,7 +14,6 @@ def fetch_hourly(lat: float, lng: float):
     temps = j["hourly"]["temperature_2m"]
     rhs   = j["hourly"]["relative_humidity_2m"]
 
-    # start from the next 3 hours to catch midday/afternoon
     nowz = datetime.now(timezone.utc)
     start_idx = next((i for i,t in enumerate(hours) if t >= nowz.isoformat(timespec='minutes').replace('+00:00','Z')), 0)
     start_idx = min(start_idx + 3, len(hours)-12)

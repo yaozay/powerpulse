@@ -2,8 +2,8 @@ import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-PEAK_START = 15  # 3pm local
-PEAK_END   = 19  # 7pm local
+PEAK_START = 15
+PEAK_END   = 19
 
 def is_peak(ts_iso: str, tz_str: str = "America/Chicago") -> bool:
     from datetime import datetime

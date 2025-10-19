@@ -1,28 +1,38 @@
 # services/llm.py
+from __future__ import annotations
+
 import os
 import json
 import re
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from dotenv import load_dotenv
 import google.generativeai as genai
+
+# -----------------------------
+# Exceptions
+# -----------------------------
+class LLMUnavailable(RuntimeError):
+    """Raised when an endpoint requires the LLM but it's not configured/available."""
+
 
 # -----------------------------
 # Setup
 # -----------------------------
 load_dotenv()
 
-KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-if not KEY:
-    raise RuntimeError("Missing GOOGLE_API_KEY (or GEMINI_API_KEY)")
+API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+MODEL_NAME = os.getenv("GEMINI_MODEL") or "gemini-1.5-flash"
 
-MODEL = os.getenv("GEMINI_MODEL") or "gemini-1.5-flash"  # stable default
+if API_KEY:
+    genai.configure(api_key=API_KEY)
+    _model = genai.GenerativeModel(MODEL_NAME)
+else:
+    _model = None  # build_nudge will fallback; chat_reply will raise LLMUnavailable
 
-genai.configure(api_key=KEY)
-_model = genai.GenerativeModel(MODEL)
 
 # -----------------------------
-# Helpers
+# Small helpers (formatting + parsing)
 # -----------------------------
 def _nz(x) -> bool:
     """True if x is a positive number."""
@@ -64,13 +74,11 @@ def _extract_json_message(text: str) -> str:
     t = (text or "").strip()
     if not t:
         return ""
-    # Direct JSON?
     if t.startswith("{"):
         try:
             return (json.loads(t).get("message") or "").strip()
         except Exception:
             pass
-    # JSON somewhere inside
     m = re.search(r"\{.*\}", t, flags=re.DOTALL)
     if m:
         try:
@@ -79,9 +87,11 @@ def _extract_json_message(text: str) -> str:
             pass
     return t.strip()
 
-def _fallback(persona: str, top_event: Optional[Dict[str, Any]], context: Optional[Dict[str, Any]]) -> str:
+def _fallback(persona: str,
+              top_event: Optional[Dict[str, Any]],
+              context: Optional[Dict[str, Any]]) -> str:
     """
-    Safer fallback that avoids '~0 g CO₂' and uses persona.
+    Safe, local nudge builder (no LLM). Uses available non-zero numbers when possible.
     """
     top_event = top_event or {}
     context = context or {}
@@ -94,14 +104,13 @@ def _fallback(persona: str, top_event: Optional[Dict[str, Any]], context: Option
     if _nz(ev_kwh) or _nz(ev_usd) or _nz(ev_co2):
         parts = []
         ek = _fmt_energy(ev_kwh)
-        if ek: parts.append(f"Evening usage: {ek}")
+        if ek: parts.append(f"Evening: {ek}")
         ec = _fmt_money(ev_usd)
         if ec: parts.append(f"Cost: {ec}")
         eC = _fmt_co2(ev_co2)
-        if eC: parts.append(f"Emissions: {eC}")
+        if eC: parts.append(f"CO₂: {eC}")
         headline = " • ".join(parts) if parts else "Evening usage detected."
     else:
-        # try top_event savings
         sav = (top_event or {}).get("savings") or {}
         kwh = sav.get("kwh", 0)
         usd = sav.get("cost_usd", 0)
@@ -113,20 +122,23 @@ def _fallback(persona: str, top_event: Optional[Dict[str, Any]], context: Option
         headline = "Potential impact: " + " • ".join(parts) if parts else "Quick energy tip:"
 
     if persona == "budget":
-        return f"{headline} Run dishwasher and laundry after 10 pm; avoid oven—use air fryer/microwave. Turn off unused lights."
-    if persona == "comfort":
-        return f"{headline} Nudge thermostat +2 °F and use a fan. Delay heat-dry on dishwasher; keep only task lighting on."
-    # default
-    return f"{headline} Shift laundry/dishwasher later, use task lighting, and avoid oven in peak—prefer air fryer or microwave."
+        tip = "Run dishwasher/laundry after 10 pm; avoid oven—use air fryer/microwave; turn off unused lights."
+    elif persona == "comfort":
+        tip = "Nudge thermostat +2 °F and use a fan; delay dishwasher heat-dry; keep only task lighting on."
+    else:
+        tip = "Shift laundry/dishwasher later, use task lighting, and avoid oven in peak—prefer air fryer or microwave."
+
+    msg = f"{headline} {tip}"
+    return (msg[:177] + "...") if len(msg) > 180 else msg
+
 
 # -----------------------------
 # Public: build_nudge
 # -----------------------------
-def build_nudge(persona: str, context: dict) -> str:
+def build_nudge(persona: str, context: Dict[str, Any]) -> str:
     """
-    Short, single-sentence(ish) nudge.
-    Uses numbers ONLY if provided and non-zero; otherwise gives a sensible generic tip.
-    Returns <= 180 chars when possible.
+    Short, single nudge (<= ~180 chars). Uses non-zero numbers when present.
+    If the LLM is available, uses it; otherwise falls back locally.
     """
     payload = {
         "persona": persona,
@@ -140,13 +152,17 @@ def build_nudge(persona: str, context: dict) -> str:
         "summary": context.get("summary", {}),
         "tariff": context.get("tariff", {}) or {"usd_per_kwh": context.get("tariff_usd_per_kwh")},
         "location": context.get("location", {}),
-        # direct metrics
+        # direct metrics (optional)
         "evening_kwh": context.get("evening_kwh"),
         "evening_cost_usd": context.get("evening_cost_usd"),
         "evening_co2_kg": context.get("evening_co2_kg"),
     }
 
-    # Build a compact, numbers-only facts line (only when non-zero)
+    # If no LLM, return a strong local fallback
+    if _model is None:
+        return _fallback(persona, payload["top_event"], context)
+
+    # Build a compact facts line
     facts = []
     ek = _fmt_energy(payload.get("evening_kwh"))
     if ek: facts.append(f"Evening: {ek}")
@@ -160,7 +176,7 @@ def build_nudge(persona: str, context: dict) -> str:
         "You are PowerPulse, a concise energy coach.\n"
         "Write ONE actionable tip (<= 180 characters). "
         "If numeric facts are provided and non-zero, include ONE numeric impact (kWh, $, or CO₂). "
-        "If no non-zero numbers exist, DO NOT invent numbers; give a generic, practical tip. "
+        "If no non-zero numbers exist, DO NOT invent numbers; give a practical tip. "
         "No emojis, no disclaimers."
     )
 
@@ -186,7 +202,7 @@ def build_nudge(persona: str, context: dict) -> str:
             generation_config={"temperature": 0.2, "max_output_tokens": 120},
             request_options={"timeout": 20}
         )
-        msg = _extract_json_message(resp.text)
+        msg = _extract_json_message(getattr(resp, "text", "") or "")
         msg = " ".join((msg or "").split())
         if not msg:
             return _fallback(persona, payload["top_event"], context)
@@ -194,47 +210,41 @@ def build_nudge(persona: str, context: dict) -> str:
     except Exception:
         return _fallback(persona, payload["top_event"], context)
 
-# -----------------------------
-# Public: chat_with_energy_data
-# -----------------------------
-def chat_with_energy_data(context: dict) -> str:
-    """
-    Interactive chat for the Energy Coach.
 
-    Expects context keys (optional):
-    - home_id: int
-    - current_power_kw: float
-    - today_usage_kwh: float
-    - today_cost_usd: float
-    - today_co2_kg: float
-    - evening_kwh / evening_cost_usd / evening_co2_kg: floats
-    - tariff_usd_per_kwh: float
-    - grid_intensity_kg_per_kwh: float
-    - weather: dict
-    - user_message: str
-    - conversation_history: list[str]
-    - potentials: list[{"name":str, "shift_kwh"?:float, "save_kwh"?:float, "note"?:str}]
+# -----------------------------
+# Public: chat_reply  (requires LLM)
+# -----------------------------
+def chat_reply(
+    messages: List[Dict[str, str]],
+    persona: Optional[str] = None,
+    context: Optional[Dict[str, Any]] = None,
+) -> str:
     """
-    system_lines = [
-        "You are an AI Energy Coach for PowerPulse.",
-        f"Home ID: {context.get('home_id', 'Unknown')}",
-        f"Current Power: {float(context.get('current_power_kw') or 0):.1f} kW",
-        f"Today Usage: {float(context.get('today_usage_kwh') or 0):.1f} kWh",
-        f"Today Cost: {float(context.get('today_cost_usd') or 0):.2f} USD",
-        f"Today CO₂: {float(context.get('today_co2_kg') or 0):.1f} kg",
+    Next assistant reply given short chat history.
+    Raises LLMUnavailable if the model isn't configured.
+    """
+    if _model is None:
+        raise LLMUnavailable(
+            "Gemini client is not configured. Set GOOGLE_API_KEY or GEMINI_API_KEY (and optionally GEMINI_MODEL)."
+        )
+
+    persona = persona or "eco"
+    context = context or {}
+
+    history = [
+        {"role": m.get("role", "user"), "content": m.get("content", "")}
+        for m in (messages or [])[-10:]
     ]
 
-    # Optional weather
-    weather = context.get("weather") or {}
-    if weather:
-        ot = weather.get("temperature_f")
-        it = weather.get("indoor_temperature_c")
-        if ot is not None:
-            system_lines.append(f"Outdoor Temp: {ot} °F")
-        if it is not None:
-            system_lines.append(f"Indoor Temp: {it} °C")
+    system_lines = [
+        "You are PowerPulse, a concise residential energy coach.",
+        "Respond in 2–4 sentences, practical and supportive.",
+        "Use ONLY provided numbers; do not invent. If negligible, say 'negligible'.",
+        "Prioritize actions: thermostat, laundry/dishwasher timing, cooking method, lighting, phantom loads.",
+        f"Persona: {persona}",
+    ]
 
-    # Evening facts (only if non-zero)
+    # Optional facts
     ek = _fmt_energy(context.get("evening_kwh"))
     ec = _fmt_money(context.get("evening_cost_usd"))
     eC = _fmt_co2(context.get("evening_co2_kg"))
@@ -242,58 +252,38 @@ def chat_with_energy_data(context: dict) -> str:
     if evening_bits:
         system_lines.append("Evening window (5–10 pm): " + " | ".join(evening_bits))
 
-    system_lines += [
-        "",
-        "Your role:",
-        "1) Analyze the user's energy data when they ask questions.",
-        "2) Provide specific, actionable recommendations using ONLY provided numbers; do not invent.",
-        "3) Be helpful and concise (2–4 sentences).",
-        "4) Quantify kWh, $, and CO₂ (kg) when inputs are non-zero; if negligible (<0.05 kWh or <$0.01), say 'negligible'.",
-        "5) Prioritize practical household actions (thermostat, laundry/dishwasher timing, cooking method, lighting, phantom loads).",
-    ]
-
-    # Potentials (optional guide for the LLM)
-    pots = context.get("potentials") or []
-    if pots:
-        lines = []
-        for p in pots[:8]:
-            name = p.get("name", "Device")
-            if "shift_kwh" in p:
-                lines.append(f"- {name}: shift ~{p['shift_kwh']} kWh. {p.get('note','')}")
-            elif "save_kwh" in p:
-                lines.append(f"- {name}: save ~{p['save_kwh']} kWh. {p.get('note','')}")
-        if lines:
-            system_lines += ["", "Reference potentials:", *lines]
-
     system_prompt = "\n".join(system_lines).strip()
 
-    # Conversation history
-    conversation = ""
-    if context.get("conversation_history"):
-        conversation = "Recent conversation:\n" + "\n".join(context["conversation_history"][-4:]) + "\n\n"
+    payload = {
+        "persona": persona,
+        "context": context,
+        "history": history,
+    }
+    user_prompt = "Chat history JSON (latest last). Provide the next assistant reply.\n" + json.dumps(payload, ensure_ascii=False)
 
-    user_prompt = conversation + f"User: {context.get('user_message', '').strip()}"
+    resp = _model.generate_content(
+        [
+            {"role": "system", "parts": [system_prompt]},
+            {"role": "user", "parts": [user_prompt]},
+        ],
+        generation_config={"temperature": 0.4, "max_output_tokens": 400},
+        request_options={"timeout": 25},
+    )
+    text = (getattr(resp, "text", "") or "").strip()
+    if not text:
+        # Let caller decide fallback behavior
+        raise LLMUnavailable("Empty reply from LLM")
+    return " ".join(text.split())
 
+
+# -----------------------------
+# Back-compat wrapper
+# -----------------------------
+def chat_with_energy_data(context: Dict[str, Any]) -> str:
+    """
+    Legacy wrapper used by older code paths.
+    """
     try:
-        # Use system + user roles; more reliable than concatenating both in a single user part
-        response = _model.generate_content(
-            [
-                {"role": "system", "parts": [system_prompt]},
-                {"role": "user", "parts": [user_prompt]},
-            ],
-            generation_config={"temperature": 0.5, "max_output_tokens": 500, "top_p": 0.95},
-            request_options={"timeout": 30}
-        )
-        text = (response.text or "").strip()
-        if not text:
-            # graceful fallback if model returns empty
-            return build_nudge(persona="friendly", context=context)
-        return text
-
-    except Exception as e:
-        print(f"Gemini chat error: {e}")
-        # graceful fallback to a short nudge instead of an apology
-        try:
-            return build_nudge(persona="friendly", context=context)
-        except Exception:
-            return "Here are quick steps: use task lighting, delay laundry/dishwasher to off-peak, and avoid the oven—prefer air fryer or microwave."
+        return chat_reply(messages=[], persona="friendly", context=context)
+    except LLMUnavailable:
+        return build_nudge(persona="friendly", context=context)
