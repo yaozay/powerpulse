@@ -1,97 +1,148 @@
-import os
-from fastapi import FastAPI
-from dotenv import load_dotenv
-from models import AnalyzeReq, AnalyzeResp
-from services.weather import fetch_hourly
-from services.tariff import is_peak, tariff_cents
-from services.analytics import (
-    baseline_by_size, predict_kwh, deviation,
+import yaml
+from pathlib import Path
+from fastapi import FastAPI, HTTPException
+from datetime import datetime
+from app.schemas import AnalyzeReq, AnalyzeResp, PredictRequest, PredictResponse, SeriesItem, Event, Savings, AnalyzeSummary
+from app.weather import fetch_hourly
+from app.tariff import is_peak, tariff_cents
+from app.analytics import (
+    baseline_by_size, predict_kwh_rule, deviation,
     savings_raise_thermostat, savings_shift_appliance,
     co2_g, cost_usd
 )
-from services.llm import build_nudge
+from app.ridge_adapter import predict_batch
 
-load_dotenv()
-app = FastAPI(title="PowerPulse Backend")
+
+CFG = yaml.safe_load(Path("config.yaml").read_text())
+MODEL_PATH = CFG["model"]["path"]
+
+TZ = CFG["location"]["timezone"]
+
+app = FastAPI(title="PowerPulse Backend", version="1.0")
 
 @app.get("/health")
-def health(): return {"ok": True}
+def health():
+    ok = Path(MODEL_PATH).exists()
+    return {"ok": True, "model_present": ok, "model_path": MODEL_PATH}
+
+@app.post("/predict", response_model=PredictResponse)
+def predict(req: PredictRequest):
+    try:
+        preds = predict_batch([r.model_dump() for r in req.rows], MODEL_PATH)
+        return PredictResponse(predictions_kwh_next=[float(x) for x in preds])
+    except FileNotFoundError:
+        raise HTTPException(status_code=400, detail="Model not found. Train first (training/train.py).")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"predict_failed: {e}")
 
 @app.post("/analyze", response_model=AnalyzeResp)
 def analyze(req: AnalyzeReq):
-    lat, lng = req.location["lat"], req.location["lng"]
+    # 1) resolve location & persona
+    loc = (req.location or {}) or {}
+    lat = loc.get("lat", CFG["location"]["lat"])
+    lng = loc.get("lng", CFG["location"]["lng"])
     home_size = (req.home or {}).get("size", "medium")
-    persona   = (req.prefs or {}).get("comfort", "eco")  # eco|budget|comfort
 
-    # 1) Weather (next 12 hours)
-    hourly = fetch_hourly(lat, lng)  # [{ts, tempC, rh}...]
+    # 2) weather horizon (12h)
+    try:
+        hourly = fetch_hourly(lat, lng, hours=12, tz=TZ)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"weather_unavailable: {e}")
 
-    # 2) Baseline & predictions
+    if not hourly:
+        empty = AnalyzeResp(
+            horizon_minutes=0,
+            series=[],
+            events=[],
+            summary=AnalyzeSummary.model_validate({"todayKwh":0.0,"potentialSavingsKwh":0.0}),
+            nudge="No weather data; unable to analyze."
+        )
+        return empty
+
+    # 3) baseline & predictions (use trained model if present, else rule-based)
     base = baseline_by_size(home_size)
     series = []
-    for h in hourly:
-        pred = predict_kwh(base, h["tempC"])
-        series.append({"ts": h["ts"], "predicted_kwh": pred, "baseline_kwh": round(base,3)})
-
-    # 3) Events (SPIKE/PEAK/NORMAL) + savings
     events = []
+
+    # Build rows for model inference (if model exists)
+    model_ready = Path(MODEL_PATH).exists()
+    if model_ready:
+        rows = []
+        for h in hourly:
+            ts = h["ts"]
+            row = dict(
+                timestamp=ts.isoformat(),
+                kwh=base,  # simple prior
+                temp_out_c=float(h["tempC"]),
+                humidity=float(h.get("rh", 50.0)),
+                hour=ts.hour,
+                dayofweek=ts.weekday(),
+                is_peak=int(is_peak(ts, *CFG["model"]["peak_hours"])),
+                baseline_kwh_per_hour=base,
+                tariff_usd_per_kwh=0.26,
+                home_size_sqft=1200,
+                occupants=2,
+                ma3=base, ma12=base, lag1=base, lag2=base,
+                season="summer", hvac_type="central_ac", comfort_level="2",
+            )
+            rows.append(row)
+        yhat = predict_batch(rows, MODEL_PATH)
+        for h, pred in zip(hourly, yhat):
+            series.append(SeriesItem(ts=h["ts"], predicted_kwh=float(pred), baseline_kwh=round(base,4)))
+    else:
+        for h in hourly:
+            pred = predict_kwh_rule(base, h["tempC"])
+            series.append(SeriesItem(ts=h["ts"], predicted_kwh=float(pred), baseline_kwh=round(base,4)))
+
+    # 4) events & savings
     for p in series:
-        peak = is_peak(p["ts"])
-        dev  = deviation(p["predicted_kwh"], p["baseline_kwh"])
+        peak = is_peak(p.ts, *CFG["model"]["peak_hours"])
+        dev  = deviation(p.predicted_kwh, p.baseline_kwh)
         if dev >= 0.20:
-            # SPIKE → RAISE_THERM
-            saved = savings_raise_thermostat(p["predicted_kwh"], 2.0)
-            cents = tariff_cents(peak)
-            events.append({
-                "type": "SPIKE", "at": p["ts"],
-                "suggestion": "RAISE_THERM",
-                "savings": {
-                    "kwh": saved,
-                    "co2_g": co2_g(saved),
-                    "cost_usd": cost_usd(saved, cents),
-                },
-                "reason": f"Predicted usage {int(dev*100)}% above baseline"
-            })
+            saved = savings_raise_thermostat(p.predicted_kwh, 2.0)
+            cents = tariff_cents(peak, CFG["tariff"]["peak_cents_per_kwh"], CFG["tariff"]["offpeak_cents_per_kwh"])
+            events.append(Event(
+                type="SPIKE", at=p.ts, suggestion="RAISE_THERM",
+                savings=Savings(
+                    kwh=round(saved,3),
+                    co2_g=co2_g(saved),
+                    cost_usd=cost_usd(saved, cents)
+                ),
+                reason=f"Predicted usage {int(dev*100)}% above baseline"
+            ))
         elif peak:
-            # PEAK → SHIFT_APPLIANCE
             saved = savings_shift_appliance(1.0)
-            cents = tariff_cents(True)
-            events.append({
-                "type": "PEAK", "at": p["ts"],
-                "suggestion": "SHIFT_APPLIANCE",
-                "savings": {
-                    "kwh": saved,
-                    "co2_g": co2_g(saved),
-                    "cost_usd": cost_usd(saved, cents),
-                },
-                "reason": "Peak tariff window"
-            })
+            cents = tariff_cents(True, CFG["tariff"]["peak_cents_per_kwh"], CFG["tariff"]["offpeak_cents_per_kwh"])
+            events.append(Event(
+                type="PEAK", at=p.ts, suggestion="SHIFT_APPLIANCE",
+                savings=Savings(
+                    kwh=round(saved,3),
+                    co2_g=co2_g(saved),
+                    cost_usd=cost_usd(saved, cents)
+                ),
+                reason="Peak tariff window"
+            ))
         else:
-            events.append({
-                "type": "NORMAL", "at": p["ts"],
-                "suggestion": "NONE",
-                "savings": {"kwh": 0.0, "co2_g": 0, "cost_usd": 0.0},
-                "reason": "Within expected range"
-            })
+            events.append(Event(
+                type="NORMAL", at=p.ts, suggestion="NONE",
+                savings=Savings(kwh=0.0, co2_g=0, cost_usd=0.0),
+                reason="Within expected range"
+            ))
 
-    # 4) Summary + best event
-    today_kwh = round(sum(p["predicted_kwh"] for p in series), 2)
-    potential = round(sum(e["savings"]["kwh"] for e in events if e["type"] != "NORMAL"), 2)
-    top_event = max(events, key=lambda e: (e["savings"]["kwh"], e["type"]!="NORMAL"))
+    # 5) summary + plain nudge text
+    today_kwh = round(sum(s.predicted_kwh for s in series), 3)
+    potential = round(sum(e.savings.kwh for e in events if e.type != "NORMAL"), 3)
 
-    context = {
-    "location": {"city": "Houston"},           # optional
-    "tariff": {"is_peak": True},               # or your actual tariff state
-    "top_event": top_event,
-    "summary": {"todayKwh": today_kwh, "potentialSavingsKwh": potential}
-    }
-    
-    nudge = build_nudge(persona, context)
+    # choose top non-normal by savings
+    non_normal = [e for e in events if e.type != "NORMAL"]
+    top = max(non_normal, key=lambda e: e.savings.kwh) if non_normal else events[0]
+    nudge = f"{top.reason}. Estimated savings ~{top.savings.kwh:.2f} kWh (~${top.savings.cost_usd:.2f}, {top.savings.co2_g} g CO₂)."
 
-    return {
-        "horizonMinutes": 12*60,
-        "series": series,
-        "events": events,
-        "summary": {"todayKwh": today_kwh, "potentialSavingsKwh": potential},
-        "nudge": nudge
-    }
+    resp = AnalyzeResp(
+        horizon_minutes=len(series)*60,
+        series=series,
+        events=events,
+        summary=AnalyzeSummary.model_validate({"todayKwh": today_kwh, "potentialSavingsKwh": potential}),
+        nudge=nudge
+    )
+    return resp

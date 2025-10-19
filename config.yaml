@@ -1,0 +1,17 @@
+data_source: csv
+csv:
+  path: data/alldata.csv
+  timestamp_col: timestamp
+  target_col: kwh_next
+model:
+  path: models/ridge_pipeline.pkl
+  alpha: 0.5
+  peak_hours: [15, 19]
+  freq_min: 15
+tariff:
+  peak_cents_per_kwh: 26
+  offpeak_cents_per_kwh: 12
+location:
+  lat: 29.7604
+  lng: -95.3698
+  timezone: America/Chicago
