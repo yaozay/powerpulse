@@ -12,7 +12,7 @@ export default function LoginPage() {
             </div>
           </div>
           <h1 className="mb-2 font-sans text-3xl font-semibold text-foreground">Welcome to PowerPulse</h1>
-          <p className="text-muted-foreground">Sign in for managing your home energy</p>
+          <p className="text-muted-foreground">Sign in to managing your home energy</p>
         </div>
         <LoginForm />
       </div>
